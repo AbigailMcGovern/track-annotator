@@ -1,9 +1,11 @@
+from scipy.ndimage.measurements import label
+from zarr.util import json_dumps
 from data_io import dict_2_JSON_serializable, single_zarr
 from datetime import date
 from itertools import repeat
 import json
 import numpy as np
-from numpy import ndarray
+from numpy import array, ndarray
 import os
 import pandas as pd 
 from pandas import DataFrame
@@ -13,6 +15,10 @@ import time
 from toolz import curry
 from typing import Iterable, Union
 from view_tracks import get_tracks, add_track_length
+import zarr
+from nd2_dask.nd2_reader import nd2_reader
+import dask.array as da
+from datetime import datetime
 
 
 # ------------------------------
@@ -21,7 +27,7 @@ from view_tracks import get_tracks, add_track_length
 
 def random_sample(
                   df: DataFrame,
-                  array: ndarray, 
+                  shape: tuple, 
                   name: str,
                   n_samples: int,
                   frames: int =10, 
@@ -40,7 +46,7 @@ def random_sample(
     Take a random sample from a 
     """
     #array = single_zarr(image_path)
-    shape = array.shape
+    #shape = array.shape
     _frames = np.floor_divide(frames, 2)
     _box = np.floor_divide(box, 2)
     # this is the image shape scaled to the data
@@ -166,6 +172,8 @@ def _add_sample_info(id_col,
             (df[time_col] >= t - _frames) & 
             (df[time_col] <= t + _frames)
             ]
+        if max_lost_prop is None:
+            max_lost_prop = 1.
         right_len = len(lil_df) >= np.floor((1-max_lost_prop) * (_frames * 2 + 1))
         right_len = right_len and len(lil_df) <= _frames * 2 + 1
         new_pair = pair not in sample.keys()
@@ -265,6 +273,11 @@ def _box_shape(
     for i, col in enumerate(array_order):
             s = np.divide(1, image_scale[i])
             sample_scale.append(s)
+    sample_scale = np.array(sample_scale)
+    sample_scale = sample_scale / sample_scale.max()
+    for i, col in enumerate(array_order):
+        if col == time_col:
+            sample_scale[i] = 1
     # if necessary, change configuration of non_tzyx_col
     if not isinstance(non_tzyx_col, Iterable):
         non_tzyx_col = [non_tzyx_col]
@@ -341,19 +354,20 @@ def _coords_slices(
             sz = hc_shape[i]
             # scale the tracks value to fit the image
             sample_2_box_scale = sample_scale[i]
-            value = np.multiply(row[coord].values[0], sample_2_box_scale)
             # scale the bounding box for the image coordinate
             box = np.multiply(_box, sample_2_box_scale)
+            # get the coord in pixels and the projected bounding box
+            value = row[coord].values[0]
             col_min = np.floor(value - box).astype(int)
             col_max = np.floor(value + box).astype(int)
             sz1 = col_max - col_min
             diff = sz1 - sz
             col_min, col_max = _correct_diff(diff, col_min, col_max)
             # slice corrections
-            box_to_tracks_scale = image_scale[i]
-            # get the max and min values for track vertices in box scale
-            max_coord = np.multiply(df[coord].max(), sample_2_box_scale)
-            min_coord = np.multiply(df[coord].min(), sample_2_box_scale)
+            #box_to_tracks_scale = image_scale[i]
+            # get the max and min values for track vertices in pixels
+            max_coord = df[coord].max()
+            min_coord = df[coord].min()
             # correct box shape if the box is too small to capture the 
             # entire track segment
             if min_coord < col_min:
@@ -376,8 +390,8 @@ def _coords_slices(
             #m2 = f'{col_min}:{col_max} for coord {coord}'
             #assert diff >= 0, m0 + m1 + m2
             # correct the position data for the frame
-            c_min = (col_min * box_to_tracks_scale)
-            df[coord] = df[coord] - c_min 
+            #c_min = (col_min * box_to_tracks_scale)
+            df[coord] = df[coord] - col_min 
     return sample
 
 
@@ -427,15 +441,16 @@ def _tracks_df(df, sample, id_col, time_col, array_order):
                 row.loc[:, mean_name] = mean
                 row.loc[:, sem_name] = sem
         # add bounding box information 
-        row = _add_bbox_info(row, sample, array_order)
+        row = _add_bbox_info(pair, row, sample, array_order, time_col)
         info.append(row)
     info = pd.concat(info)
     info = info.reset_index(drop=True)
     info = info.drop(columns=['Unnamed: 0'])
+    info['annotated'] = [False, ] * len(info)
     return info 
 
 
-def _add_bbox_info(row, sample, array_order):
+def _add_bbox_info(pair, row, sample, array_order, time_col):
     for coord in array_order:
         s_ = sample[pair]['b_box'][coord]
         s_min = s_.start
@@ -456,8 +471,10 @@ def _add_bbox_info(row, sample, array_order):
 
 def sample_tracks(df: DataFrame,
                   image_path: str, 
+                  shape : tuple,
                   name: str,
                   n_samples: int,
+                  labels_path: Union[str, None]=None,
                   frames: int =10, 
                   box: int =60,
                   id_col: str ='ID', 
@@ -487,10 +504,9 @@ def sample_tracks(df: DataFrame,
     if min_track_length is not None:
         df = df.loc[df['track_length'] >= min_track_length, :]
     # get the sample
-    array = single_zarr(image_path)
     sample = random_sample(
                            df,
-                           array, 
+                           shape, 
                            name,
                            n_samples,
                            frames, 
@@ -507,6 +523,7 @@ def sample_tracks(df: DataFrame,
     # add track arrays ready for input to napari tracks layer 
     sample = _add_track_arrays(sample, id_col, time_col, coords_cols)
     sample['image_path'] = image_path
+    sample['labels_path'] = labels_path
     sample['sample_type'] = 'random tracks'
     sample = _add_construction_info(sample, id_col, time_col, 
                                     array_order, non_tzyx_col)
@@ -521,9 +538,12 @@ def _add_disp_weights(df, coords_cols, id_col):
         """
         coords = coords_cols
         weights = []
+        ids = df[id_col].values
+        unique_ids = list(df[id_col].unique())
         for ID in list(df[id_col].unique()):
+            id_df = df.loc[(df[id_col] == ID)][coords]
             # get the finite difference for the position vars
-            diff = df.loc[(df[id_col] == ID)][coords].diff()
+            diff = id_df.diff()
             diff = diff.fillna(0)
             # generate L2 norms for the finite difference vectors  
             n2 = list(np.linalg.norm(diff.to_numpy(), 2, axis=1))
@@ -564,9 +584,11 @@ def _add_track_arrays(sample, id_col, time_col, coords_cols):
 # -------------------------
 
 def sample_track_terminations(df: DataFrame,
-                              array: ndarray, 
+                              image_path: str,
+                              shape: tuple, 
                               name: str,
                               n_samples: int,
+                              labels_path: Union[str, None]=None,
                               frames: int =10, 
                               box: int =60,
                               id_col: str ='ID', 
@@ -585,9 +607,11 @@ def sample_track_terminations(df: DataFrame,
     # get sample
     sample = sample_tracks(
                            df,
-                           array, 
+                           image_path,
+                           shape, 
                            name,
                            n_samples,
+                           labels_path,
                            frames, 
                            box,
                            id_col, 
@@ -831,32 +855,269 @@ def _add_construction_info(sample, id_col, time_col, array_order, non_tzyx_col):
     return sample
 
 
+def open_with_correct_modality(image_path, channel=None, chan_axis=0):
+    suffix = Path(image_path).suffix
+    if suffix == '.nd2':
+        layerlist = nd2_reader(image_path)
+        if channel is None:
+            image = [l[0] for l in layerlist]
+            image = da.stack(image)
+        else:
+            image = layerlist[channel][0]
+    elif suffix == '.zarr':
+        image = zarr.open(image_path)
+        if channel is not None:
+            s_ = [slice(None, None), ] * len(image.ndim)
+            s_[chan_axis] = slice(channel, channel + 1)
+            image = image[s_]
+            image = da.array(image)
+    elif suffix == '.h5' or suffix == '.hdf5':
+        if channel is not None:
+            print('channel == None')
+            image = read_from_h5(image_path, channel=channel)
+        elif channel == 2:
+            print('channel == 2')
+            image = read_from_h5(image_path, channel='channel2')
+        else:
+            print('channel == ', channel)
+            image = read_from_h5(image_path, channel='channel2')
+    return image
+
+
+def read_from_h5(h5_path, channel='channel2'):
+    '''
+    For corrupted nd2 files saved as h5 files using Fiji
+    h5 key structure for these files is as follows:
+        {'t<index>' : {'channel<index>' : <3d array>, ...}, ...} 
+    '''
+    import h5py
+    print('imported h5py')
+    with h5py.File(h5_path) as f:
+        print('read h5 file')
+        t_keys = [int(key[1:]) for key in f.keys() if 't' in key]
+        t_keys = ['t' + str(key) for key in sorted(t_keys)]
+        #print(t_keys)
+        c_keys = [key for key in f[t_keys[0]].keys()]
+        #print(c_keys)
+        #images = []
+        frame = f[t_keys[0]][c_keys[0]]
+        print('Getting channel with key: ', channel)
+        for i, c in enumerate(c_keys):
+            if c == channel:
+                chan_image = np.zeros((len(t_keys), ) + frame.shape, dtype=frame.dtype)
+                print('Generated empty numpy for channel with shape: ', chan_image.shape)
+                for j, t in enumerate(t_keys):
+                    chan_image[j, :, :, :] = f[t][c]
+                print('Added h5 data to np array')
+                image = da.from_array(chan_image)
+                print('converted to dask')
+                #images.append(chan_da)
+                #image = chan_da
+    return image
+
+
+# ---------------
+# GET SAMPLE DATA
+# ---------------
+
+def get_sample_hypervolumes(sample, img_channel=None):
+    image_path = sample['image_path']
+    print(image_path)
+    labels_path = sample['labels_path']
+    image = open_with_correct_modality(image_path, img_channel)
+    if labels_path is not None:
+        labels = open_with_correct_modality(labels_path)
+    else:
+        labels = None
+    array_order = sample['coord_info']['array_order']
+    pairs = [key for key in sample.keys() if isinstance(key, tuple)]
+    for pair in pairs:
+        l = len(array_order)
+        m = f'Image must be of same dimensions ({l}) as in the sample array_order: {array_order}'
+        assert image.ndim == l, m
+        slice_ = []
+        for key in array_order:
+            s_ = sample[pair]['b_box'][key]
+            slice_.append(s_)
+        #print(slice_)
+        #print(image)
+        img = image[tuple(slice_)]
+        if isinstance(img, da.core.Array):
+            img = img.compute()
+        if labels is not None:
+            lab = labels[tuple(slice_)]
+            if isinstance(lab, da.core.Array):
+                lab = img.compute()
+        else:
+            lab = None
+        sample[pair]['image'] = img
+        sample[pair]['labels'] = lab
+    return sample
+
+
+
 
 # -----------
 # SAVE SAMPLE 
 # -----------
 
-def save_sample(save_name, sample):
+def save_sample(save_dir, sample):
     """
-    Parse sample info to JSON serialisable and save
-    NEEDS DEBUGGING GAVE UP 
-        - TE: int64 not seriablisable (even after dataframes corrected)
     """
-    sample = sample.copy()
-    pass
-    
+    pairs = [key for key in sample.keys() if isinstance(key, tuple)]
+    n_samples = len(pairs)
+    file_name = Path(sample['image_path']).stem
+    if sample['sample_type'] == 'random tracks':
+        tp = 'rtracks'
+    elif sample['sample_type'] == 'track terminations':
+        tp = 'tterm'
+    elif sample['sample_type'] == 'untracked objects':
+        tp = 'uobj'
+    else:
+        tp = 'ukn'
+    now = datetime.now()
+    dt = now.strftime("%y%m%d_%H%M%S")
+    name = file_name + f'_{tp}_{dt}_n={n_samples}.smpl'
+    sample_dir = os.path.join(save_dir, name)
+    os.makedirs(sample_dir, exist_ok=True)
+    # save base for sample
+    sample_json = {
+        'image_path' : sample['image_path'],
+        'labels_path' : sample['labels_path'],
+        'sample_type' : sample['sample_type'], 
+        'coord_info' : sample['coord_info']
+    }
+    print(sample_json)
+    json_name = file_name + '_read-info.json'
+    with open(os.path.join(sample_dir, json_name), 'w') as f:
+        json.dump(sample_json, f, indent=4)
+    # save the info data frame
+    info_name = file_name + '_info.csv'
+    sample['info'].to_csv(os.path.join(sample_dir, info_name))
+    # save the individual samples
+    for pair in pairs:
+        pair_dir = os.path.join(sample_dir, str(pair))
+        os.makedirs(pair_dir)
+        # save the df
+        df_name = str(pair) + '_df.csv'
+        sample[pair]['df'].to_csv(os.path.join(pair_dir, df_name))
+        # save the tracks
+        tracks_name = str(pair) + '_tracks.zarr'
+        zarr.save(os.path.join(pair_dir, tracks_name), sample[pair]['tracks'])
+        # save the bounding box
+        bbox_name = str(pair) + '_bbox.json'
+        new_bbox = sample[pair]['b_box'].copy()
+        for key in new_bbox.keys():
+            s_ = new_bbox[key]
+            new_bbox[key] = (int(s_.start), int(s_.stop), s_.step)
+        with open(os.path.join(pair_dir, bbox_name), 'w') as f:
+            json.dump(new_bbox, f, indent=4)
+        # if there are any corrections, save
+        try:
+            if len(sample[pair]['corr']) > 0:
+                corr_name = str(pair) + '_corr.json'
+                with open(os.path.join(pair_dir, corr_name), 'w') as f:
+                    json.dump(sample[pair]['corr'], f)
+        except:
+            pass
+        # if the image is in the sample, save this
+        try:
+            img = sample[pair]['image']
+            image_path = os.path.join(pair_dir, str(pair) + '_image.zarr')
+            zarr.save(image_path, img)
+        except KeyError:
+            pass
+        # if the label is in the sample, save this
+        try:
+            lab = sample[pair]['labels']
+            labels_path = os.path.join(pair_dir, str(pair) + '_labels.zarr')
+            zarr.save(labels_path, lab)
+        except KeyError:
+            pass
 
+    
 
 def read_sample(sample_path):
     """
-    Parse sample info from .sample 'file'
+    Parse sample info from .smpl 'file'
     """
-    pass
+    files = os.listdir(sample_path)
+    json_path = [f for f in files if f.endswith('_read-info.json')]
+    assert len(json_path) == 1, 'There should be exactly 1 *_read-info.json file in the sample (.smpl)'
+    # get base for sample
+    with open(os.path.join(sample_path, json_path[0]), 'r') as f:
+        sample = json.load(f)
+    # get sample info
+    info_path = [f for f in files if f.endswith('info.csv')]
+    assert len(info_path) == 1, 'There should be exactly 1 *_info.csv file in the sample (.smpl)'
+    sample['info'] = pd.read_csv(os.path.join(sample_path, info_path[0]))
+    info_path = os.path.join(sample_path, info_path[0])
+    # get individual sample
+    pairs = [f for f in files if f.endswith(')') and f.startswith('(')]
+    for str_pair in pairs:
+        pair_dir = os.path.join(sample_path, str_pair)
+        pair_dict = {}
+        # get df
+        df_path = os.path.join(pair_dir, str_pair + '_df.csv')
+        pair_dict['df'] = pd.read_csv(df_path)
+        pair_dict['df_path'] = df_path
+        pair_dict['info_path'] = info_path
+        # get tracks
+        tracks_path = os.path.join(pair_dir, str_pair + '_tracks.zarr')
+        pair_dict['tracks'] = zarr.open(tracks_path)
+        # get b_box
+        bbox_path = os.path.join(pair_dir, str_pair + '_bbox.json')
+        with open(bbox_path, 'r') as f:
+            bbox = json.load(f)
+        new_bbox = {}
+        for key in bbox.keys():
+            args = list(bbox[key])
+            new_bbox[key] = slice(*args)
+        pair_dict['b_box'] = new_bbox
+        # find out if corrs exist and read if so
+        corr_path = [f for f in os.listdir(pair_dir) if f.endswith('_corr.json')]
+        if len(corr_path) > 0:
+            with open(os.path.join(pair_dir, corr_path[0]), 'r') as f:
+                corr = json.load(f)
+            pair_dict['corr'] = corr
+        # if image exists, read
+        img_path = os.path.join(pair_dir, str_pair + '_image.zarr')
+        if os.path.exists(img_path):
+            img = zarr.open(img_path)
+            pair_dict['image'] = img
+        # if labels exist, read
+        lab_path = os.path.join(pair_dir, str_pair + '_labels.zarr')
+        if os.path.exists(lab_path):
+            lab = zarr.open(lab_path)
+            pair_dict['labels'] = lab
+        # add pair to sample
+        pair = eval(str_pair)
+        sample[pair] = pair_dict
+    #print(list(sample.keys()))
+    print(list(sample[eval(pairs[0])].keys()))
+    return sample
 
 
-def save_sample_array(save_path, sample, array):
+
+
+def save_sample_volumes(sample, sample_dir):
     """
     Save image data corresponding to a sample
     """
-    pass
+    pairs = [key for key in sample.keys() if isinstance(key, tuple)]
+    for pair in pairs:
+        pair_dir = os.path.join(sample_dir, str(pair))
+        try:
+            img = sample[pair]['image']
+            image_path = os.path.join(pair_dir, str(pair) + '_image.zarr')
+            zarr.save(image_path, img)
+        except KeyError:
+            pass
+        # if the label is in the sample, save this
+        try:
+            lab = sample[pair]['labels']
+            labels_path = os.path.join(pair_dir, str(pair) + '_labels.zarr')
+            zarr.save(labels_path, lab)
+        except KeyError:
+            pass
 
