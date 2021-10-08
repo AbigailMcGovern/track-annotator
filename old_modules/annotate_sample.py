@@ -716,9 +716,9 @@ def construct_log_file(
 ):
     log_path = sample['log-path']
     df = sample['info']
-    time_col = sample['coords_info']['time_col']
-    id_col = sample['coords_info']['id_col']
-    array_order = ['coords_info']['array_order']
+    time_col = sample['coord_info']['time_col']
+    id_col = sample['coord_info']['id_col']
+    array_order = ['coord_info']['array_order']
     # count the number of samples
     counter = 0
     for key in samples.keys():
