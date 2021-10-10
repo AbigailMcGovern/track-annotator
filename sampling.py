@@ -1,6 +1,5 @@
 from scipy.ndimage.measurements import label
 from zarr.util import json_dumps
-from data_io import dict_2_JSON_serializable, single_zarr
 from datetime import date
 from itertools import repeat
 import json
@@ -14,7 +13,6 @@ from skimage.measure import regionprops
 import time
 from toolz import curry
 from typing import Iterable, Union
-from view_tracks import get_tracks, add_track_length
 import zarr
 from nd2_dask.nd2_reader import nd2_reader
 import dask.array as da
@@ -837,6 +835,37 @@ def get_objects_without_tracks(
 # -------
 # Helpers
 # -------
+
+def add_track_length(df, id_col, new_col='track_length'):
+    id_array = df[id_col].to_numpy()
+    track_count = np.bincount(id_array)
+    df[new_col] = track_count[id_array]
+    return df
+
+
+def single_zarr(input_path, c=2, idx=0):
+    '''
+    Parameters
+    ----------
+    c: int or tuple
+        Index of indices to return in array
+    idx: int or tuple
+        which indicies of the dim to apply c to
+    '''
+    assert type(c) == type(idx)
+    arr = da.from_zarr(input_path)
+    slices = [slice(None)] * arr.ndim
+    if isinstance(idx, int):
+        slices[idx] = c
+    elif isinstance(idx, tuple):
+        for i, ind in enumerate(idx):
+            slices[ind] = c[i]
+    else:
+        raise TypeError('c and idx must be int or tuple with same type')
+    slices  = tuple(slices)
+    arr = arr[slices]
+    return arr
+
 
 # referenced in sample_tracks() and sample_objects()
 def _add_construction_info(sample, id_col, time_col, array_order, non_tzyx_col):
