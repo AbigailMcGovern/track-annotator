@@ -74,3 +74,14 @@ sample_viewer.annotate()
 ```
 
 P.S., this hasn't been extensively tested... the main parts work in the conditions they've been tested in, but this probably only means I haven't yet seen where it breaks. 
+
+Keys to navagate and annotate samples
+- 'd' - move to next sample
+- 'a' - move to previous sample
+- 'y' - annotate as correct
+- 'n' - annotate as containing an error
+- 'i' - annotate the frame as following a false positive (ID swap) error
+- 'Shift-i' - annotate the fame as containing a false negative error (incorrect termination)
+- 's' - annotate an error as being associated with a segmentation error (merge or split of objects)
+
+In any case where the error is associated the specific frame, the frame number (within the original image) will be added to a list of those kinds of errors for the sample within the sample's info data frame. E.g., you may have a list of false positives (ID swaps) for your sampled track segment (`[108, 111, 112]` a corresponding list of segmentation error associations `[108, 112]`. 
