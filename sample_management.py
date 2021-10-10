@@ -38,9 +38,21 @@ def prepare_sample_for_annotation(samples, n_each=30, use_annotated=False):
             poss_idx = sample['info'].index.values
             idxs = np.random.choice(poss_idx, size=(len(triplets) - n_each), replace=False)
             #print(idxs)
-            for idx in idxs:
-                del sample[triplets[idx]]
-            sample['info'] = sample['info'].drop(list(idxs))
+            inc_trip = []
+            exc_trip = []
+            for i, trip in enumerate(triplets):
+                if i in idxs:
+                    del sample[trip]
+                    exc_trip.append(trip)
+                else:
+                    inc_trip.append(trip)
+            drop_idxs = []
+            for idx in sample['info'].index.values:
+                if sample['info'].loc[idx, 'key'] in exc_trip:
+                    drop_idxs.append(idx)
+            sample['info'] = sample['info'].drop(list(drop_idxs))
+            #print(inc_trip)
+            #print(list(sample['info']['key'].values))
             sample['info'] = sample['info'].reset_index(drop=True)
         sample_dict[key] = sample
     return sample_dict

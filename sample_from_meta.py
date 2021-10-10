@@ -34,11 +34,11 @@ def get_sample_from_metadata(
     sub_dirs=['cohort', 'treatment'], 
     shape=None,
     debug_without_tracks=False, 
-    frames=10, 
+    frames=30, 
     box=60, 
     id_col='particle', 
     time_col='t', 
-    min_track_length=20,
+    min_track_length=30,
     labels_dir=None, 
     batch_name=None,
     use_h5=False
