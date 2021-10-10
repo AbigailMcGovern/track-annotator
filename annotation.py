@@ -230,6 +230,7 @@ class SampleViewer:
             print(m)
             m = 'record the frame index in which the error occured'
             print(m)
+            print('---------------------------------------------------------')
         # get the names of layers currently attached to the viewer
         layer_names = [l.name for l in self.v.layers]
         prop = {}
@@ -388,13 +389,29 @@ class SampleViewer:
         cols = info.columns.values
         if col not in cols:
             add_empty_col(info, col, empty)
-        row = info[(info[self.id_col] == keys[1][0]) & (info[self.time_col] == keys[1][1])]
+            pls_eval = False
+        else:
+            pls_eval = True
+        row = info[(info[self.id_col[keys[0]]] == keys[1][0]) & (info[self.time_col[keys[0]]] == keys[1][1])]
         assert len(row) == 1
-        idx = row.index.values[0]
+        idx = row.index[0]
         if empty is None:
             info.at[idx, col] = data
         elif isinstance(empty, list):
-            info.at[idx, col].append(data)
+            if pls_eval:
+                l = info.loc[idx, col]
+                #print('l', l, type(l))
+                l = eval(l)
+            else:
+                l = []
+            l.append(data)
+            #print(data)
+            info.at[idx, col] = l
+            #print(l)
+            #print(info.loc[idx, col])
+            #print(info.loc[0, col])
+        to_drop = [col for col in info.columns.values if col.startswith('Unnamed:')]
+        info = info.drop(to_drop, axis=1)
         info.to_csv(info_path)
 
 
@@ -439,20 +456,22 @@ def add_empty_col(df, col, empty):
 if __name__ == '__main__':
     from sample_management import prepare_sample_for_annotation
     samples = {
-        'img_0' : ['/home/abigail/data/plateseg-training/timeseries_seg/problem-children/timeseries_seg problem-children/210601_IVMTR114_Inj1_ASA_exp3_rtracks_n=34.smpl', ], 
-        'img_1' : ['/home/abigail/data/plateseg-training/timeseries_seg/problem-children/timeseries_seg problem-children/210601_IVMTR114_Inj2_ASA_exp3_rtracks_n=33.smpl', ]
+        'img_0' : ['/home/abigail/data/plateseg-training/timeseries_seg/problem-children/timeseries_seg problem-children/210601_IVMTR114_Inj1_ASA_exp3_rtracks_211008_213041_n=34.smpl', 
+        '/home/abigail/data/plateseg-training/timeseries_seg/problem-children/timeseries_seg problem-children/210601_IVMTR114_Inj3_ASA_exp3_rtracks_211008_213053_n=33.smpl'], 
+        'img_1' : ['/home/abigail/data/plateseg-training/timeseries_seg/problem-children/timeseries_seg problem-children/210601_IVMTR114_Inj2_ASA_exp3_rtracks_211008_213047_n=33.smpl', 
+         '/home/abigail/data/plateseg-training/timeseries_seg/problem-children/timeseries_seg problem-children/210601_IVMTR114_Inj3_ASA_exp3_rtracks_211008_213053_n=33.smpl']
     }
     new_samples = prepare_sample_for_annotation(samples, n_each=15)
     keys = list(new_samples.keys())
     #print(keys)
     #print(new_samples[keys[0]]['coord_info'])
     s_keys = list(new_samples[keys[0]].keys())
-    print(s_keys)
+    #print(s_keys)
     tups = [key for key in s_keys if isinstance(key, tuple)]
     s = new_samples[keys[0]][tups[0]]
-    print(list(s.keys()))
-    print(s['image'].shape)
-    print(s['labels'].shape)
+    #print(list(s.keys()))
+    #print(s['image'].shape)
+    #print(s['labels'].shape)
     save_path = '/home/abigail/data/plateseg-training/timeseries_seg/problem-children/timeseries_seg problem-children/annotations.csv'
     sample_viewer = SampleViewer(new_samples, save_path)
     sample_viewer.annotate()
