@@ -250,8 +250,6 @@ class SampleViewer:
                     self.v.add_labels(data, 
                                       name=name, 
                                       scale=scale)
-                else:
-                    raise ValueError(f'No support for layer type {t}')
             else:
                 self.v.layers[name].data = data
         # add tracks
