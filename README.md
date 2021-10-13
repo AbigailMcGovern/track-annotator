@@ -85,4 +85,4 @@ Keys to navagate and annotate samples
 - 'Shift-t' - annotate the frame containing a false start error
 - 's' - annotate an error ('i', 't', or 'Shift-t') as being associated with a segmentation error (merge or split of objects)
 
-In any case, where the error is associated the specific frame, the frame number (within the original image) will be added to a list of those kinds of errors for the sample within the sample's info data frame. E.g., you may have a list of false positives (ID swaps) for your sampled track segment (`[108, 111, 112]`) a corresponding list of segmentation error associations (`[108, 112]`). 
+When an error is associated the specific frame ('i', 't', 'Shift-t', or 's'), the frame number (within the original image) will be added to a list of errors for the sample within the sample's (.smpl) info data frame. E.g., you may have a list of ID swaps for your sampled track segment (`[108, 111, 112]`) and a corresponding list of segmentation error associations (`[108, 112]`). 
