@@ -99,11 +99,12 @@ def get_sample_from_metadata(
                     'array_order' : array_order, 
                     'non_tzyx_col' : None, 
                     'seed' : None, 
-                    'weights' : None, 
+                    'weights' : 'log-frequency', 
                     'max_lost_prop' : None, 
                     'min_track_length' : min_track_length, 
                     'labels_path' : labels_path
                 }
+                #print(kwargs)
                 if sample_type == 'tracks':
                     sample = sample_tracks(tracks, image_path, shape, tracks_name, n, **kwargs)
                 elif sample_type == 'terminations':
