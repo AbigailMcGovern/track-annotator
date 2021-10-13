@@ -1,3 +1,4 @@
+from datetime import time
 import napari
 import numpy as np
 import os
@@ -51,8 +52,9 @@ class SampleViewer:
                  sample, 
                  save_path=None, 
                  mode='Track',
-                 false_pos_col='FP', 
-                 false_neg_col='FN',
+                 id_swap_col='id-swaps', 
+                 false_term_col='false-terminations',
+                 false_start_col='false-starts',
                  t_start='t_start', 
                  scale=(2, .5, .5)):
         '''
@@ -100,8 +102,9 @@ class SampleViewer:
         # sample info
         self.sample = sample
         self.info = {key : sample[key]['info'] for key in sample.keys()}
-        self.false_pos_col = false_pos_col # add FPs
-        self.false_neg_col = false_neg_col # add FNs
+        self.id_swap_col = id_swap_col # add FPs
+        self.false_term_col = false_term_col # add FNs
+        self.false_start_col = false_start_col
         self.seg_err_col = 'seg-error'
         self.t_start = t_start
         
@@ -150,21 +153,11 @@ class SampleViewer:
 
     def _add_annotation_cols(self):
         for key in self.keys:
-            rl_info = range(len(self.info[key]))
-            corr = [None for _ in rl_info]
-            fp = [[] for _ in rl_info]
-            fn = [[] for _ in rl_info]
-            se = [[] for _ in rl_info]
-            self.info[key]['correct'] = corr
-            self.info[key][self.false_pos_col] = fp
-            self.info[key][self.false_neg_col] = fn
-            self.info[key][self.seg_err_col] = se
-        for s_tup in self.samples_list:
-            df = self.sample[s_tup[0]][s_tup[1]]['df']
-            df[self.seg_err_col] = [None, ] * len(df)
-            df[self.false_neg_col] = [None, ] * len(df)
-            df[self.false_pos_col] = [None, ] * len(df)
-            self.sample[s_tup[0]][s_tup[1]]['df'] = df
+            add_empty_col(self.info[key], 'correct', None)
+            add_empty_col(self.info[key], self.id_swap_col, [])
+            add_empty_col(self.info[key], self.false_term_col, [])
+            add_empty_col(self.info[key], self.false_start_col, [])
+            add_empty_col(self.info[key], self.seg_err_col, [])
 
 
     def _get_full_info(self):
@@ -202,12 +195,13 @@ class SampleViewer:
         self._show_sample()
         self.v.bind_key('y', self.yes)
         self.v.bind_key('n', self.no)
-        self.v.bind_key('d', self.next)
-        self.v.bind_key('a', self.previous)
+        self.v.bind_key('2', self.next)
+        self.v.bind_key('1', self.previous)
         # on the frame after a swap assign the frame number
             # to the ID swap list
-        self.v.bind_key('i', self.false_positive)
-        self.v.bind_key('Shift-i', self.false_negative)
+        self.v.bind_key('i', self.id_swap)
+        self.v.bind_key('t', self.false_termination)
+        self.v.bind_key('Shift-t', self.false_start)
         self.v.bind_key('s', self.segmentation_error)
         napari.run()
 
@@ -219,28 +213,37 @@ class SampleViewer:
             print('---------------------------------------------------------')
             print(f"Showing sample 1/{len(self.samples_list)}")
             print('---------------------------------------------------------')
-            m = 'Mark samples as correct or incorrect by pressing y or n, '
+            m = 'Mark samples as correct or incorrect by pressing y or n, \n'
+            m = m + 'repspectively. \n'
+            m = m + '---------------------------------------------------------\n'
+            m = m + 'To indicate that an ID swap has has occured, at a given \n'
+            m = m + 'point in time press i.\n'
+            m = m + '---------------------------------------------------------\n'
+            m = m + 'To indicate that a false termination or start has occured\n'
+            m = m + 'at a given point in time, use t or Shift-t, respectively.\n'
+            m = m + '---------------------------------------------------------\n'
+            m = m + 'To indicate that a tracking error at a given time point\n'
+            m = m + 'is associated with a segmentation error, press s.\n'
+            m = m + '---------------------------------------------------------\n'
+            m = m + 'Pressing i, t or Shift-t will record the frame number at\n'
+            m = m + 'which the error occured. This will be saved into the \n'
+            m = m + 'info csv in the sample.smpl directory\n'
+            m = m + '---------------------------------------------------------\n'
+            m = m + 'To navagate to the next sample, use 2. To move to the \n'
+            m = m + 'previous sample, use 1. (a keyboard agnostic approach)\n'
+            m = m + '---------------------------------------------------------\n'
             print(m)
-            m = 'repspectively'
-            print(m)
-            print('---------------------------------------------------------')
-            m = 'Indicate a false positive or false negative has occured'
-            print(m)
-            m = 'by pressing i or Shift-i, respectively. Doing so will'
-            print(m)
-            m = 'record the frame index in which the error occured'
-            print(m)
-            print('---------------------------------------------------------')
         # get the names of layers currently attached to the viewer
         layer_names = [l.name for l in self.v.layers]
         prop = {}
         # get keys with which to obtain image, labels, and tracks
         keys = self.samples_list[self.i]
         # add volumes
+        scale = self.scale
         for name in ['image', 'labels']:
             data = np.array(self.sample[keys[0]][keys[1]][name])
+            #print(data.shape)
             if name not in layer_names:
-                scale = self.scale
                 if name == 'image':
                     self.v.add_image(data, 
                                      name=name, 
@@ -254,16 +257,22 @@ class SampleViewer:
                 self.v.layers[name].data = data
         # add tracks
         tracks = np.array(self.sample[keys[0]][keys[1]]['tracks'])
+        prop = self.sample[keys[0]][keys[1]]['df'].to_dict(orient='list')
         #print(tracks.shape)
         if 'tracks' not in layer_names:
-            prop = {'track_id': tracks[:, 0]}
-            self.v.add_tracks(tracks, properties=prop, color_by='track_id', scale=scale,
+            #prop = {'track_id': tracks[:, 0]}
+            self.v.add_tracks(tracks, properties=prop, color_by=self.time_col[keys[0]], scale=scale,
                               name='tracks', colormap='viridis', tail_width=6)
         else:
-            self.v.layers.properties = prop
             self.v.layers.color_by = 'track_id'
+            self.v.layers.properties = None
             self.v.layers['tracks'].data = tracks
-            self.v.layers.color_by = 'track_id'
+            self.v.layers['tracks'].properties = prop
+            self.v.layers['tracks'].color_by = self.time_col[keys[0]]
+            #self.v.layers.pop('tracks')
+            #self.v.add_tracks(tracks, properties=prop, color_by=self.time_col[keys[0]], scale=scale,
+                    #          name='tracks', colormap='viridis', tail_width=6)
+        #self.v.layers['tracks'].display_id = True 
         
 
 
@@ -286,41 +295,53 @@ class SampleViewer:
 
     def next(self, viewer):
         """
-        Move to next pair. Will be bound to key 'd'
+        Move to next pair. Will be bound to key '1'
         """
         print(f'next')
         self._next()
 
     def previous(self, viewer):
         """
-        Move to previous pair. Will be bound to key 'a'
+        Move to previous pair. Will be bound to key '2'
         """
         print(f'previous')
         self._previous()
     
 
-    def false_positive(self, viewer):
+    def id_swap(self, viewer):
         """
         Get the time frame at which ID swap happended
         """
         t = self._get_current()
-        self.info[self.false_pos_col][self._i].append(t)
-        print(f'False positive recorded at time {t}')
+        self.info[self.id_swap_col][self._i].append(t)
+        print(f'ID swap recorded at time {t}')
         self.save_info()
         # save to original
-        self._add_data_to_orig_info(t, self.false_pos_col, [])
+        self._add_data_to_orig_info(t, self.id_swap_col, [])
 
     
-    def false_negative(self, viewer):
+    def false_termination(self, viewer):
         """
-        Get the time frame at which ID swap happended
+        Get the time frame at which false termination occured
         """
         t = self._get_current()
-        self.info[self.false_neg_col][self._i].append(t)
-        print(f'False negative recorded at time {t}')
+        self.info[self.false_term_col][self._i].append(t)
+        print(f'False termination recorded at time {t}')
         self.save_info()
         # save to original
-        self._add_data_to_orig_info(t, self.false_neg_col, [])
+        self._add_data_to_orig_info(t, self.false_term_col, [])
+
+
+    def false_start(self, viewer):
+        """
+        Get the time frame at which false termination occured
+        """
+        t = self._get_current()
+        self.info[self.false_start_col][self._i].append(t)
+        print(f'False start recorded at time {t}')
+        self.save_info()
+        # save to original
+        self._add_data_to_orig_info(t, self.false_start_col, [])
 
 
     def segmentation_error(self, viewer):
@@ -349,7 +370,7 @@ class SampleViewer:
             print('---------------------------------------------------------')
             print(f"Showing sample {self._i + 1}/{len(self.samples_list)}")
             self._check_ann_status()
-            print("To navagate to prior samples press the a key")
+            print("To navagate to prior samples press the 1 key")
 
     
     def _previous(self):
@@ -362,7 +383,7 @@ class SampleViewer:
             print('---------------------------------------------------------')
             print(f"Showing sample {self._i + 1}/{len(self.samples_list)}")
             self._check_ann_status()
-            print("To navagate to the next sample press the d key")
+            print("To navagate to the next sample press the 2 key")
 
 
     def _annotate(self, ann):
@@ -454,10 +475,10 @@ def add_empty_col(df, col, empty):
 if __name__ == '__main__':
     from sample_management import prepare_sample_for_annotation
     samples = {
-        'img_0' : ['/home/abigail/data/plateseg-training/timeseries_seg/problem-children/timeseries_seg problem-children/210601_IVMTR114_Inj1_ASA_exp3_rtracks_211008_213041_n=34.smpl', 
-        '/home/abigail/data/plateseg-training/timeseries_seg/problem-children/timeseries_seg problem-children/210601_IVMTR114_Inj3_ASA_exp3_rtracks_211008_213053_n=33.smpl'], 
-        'img_1' : ['/home/abigail/data/plateseg-training/timeseries_seg/problem-children/timeseries_seg problem-children/210601_IVMTR114_Inj2_ASA_exp3_rtracks_211008_213047_n=33.smpl', 
-         '/home/abigail/data/plateseg-training/timeseries_seg/problem-children/timeseries_seg problem-children/210601_IVMTR114_Inj3_ASA_exp3_rtracks_211008_213053_n=33.smpl']
+        'img_0' : ['/home/abigail/data/plateseg-training/timeseries_seg/problem-children/timeseries_seg problem-children/210601_IVMTR114_Inj1_ASA_exp3_rtracks_211013_125430_n=34.smpl', 
+        '/home/abigail/data/plateseg-training/timeseries_seg/problem-children/timeseries_seg problem-children/210601_IVMTR114_Inj3_ASA_exp3_rtracks_211013_125448_n=33.smpl'], 
+        'img_1' : ['/home/abigail/data/plateseg-training/timeseries_seg/problem-children/timeseries_seg problem-children/210601_IVMTR114_Inj2_ASA_exp3_rtracks_211013_125439_n=33.smpl', 
+         '/home/abigail/data/plateseg-training/timeseries_seg/problem-children/timeseries_seg problem-children/210601_IVMTR114_Inj3_ASA_exp3_rtracks_211013_125448_n=33.smpl']
     }
     new_samples = prepare_sample_for_annotation(samples, n_each=15)
     keys = list(new_samples.keys())
@@ -473,3 +494,4 @@ if __name__ == '__main__':
     save_path = '/home/abigail/data/plateseg-training/timeseries_seg/problem-children/timeseries_seg problem-children/annotations.csv'
     sample_viewer = SampleViewer(new_samples, save_path)
     sample_viewer.annotate()
+

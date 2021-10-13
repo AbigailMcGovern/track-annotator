@@ -1,10 +1,11 @@
+import re
 from scipy.ndimage.measurements import label
 from zarr.util import json_dumps
 from datetime import date
 from itertools import repeat
 import json
 import numpy as np
-from numpy import array, ndarray
+from numpy import array, bincount, dtype, ndarray
 import os
 import pandas as pd 
 from pandas import DataFrame
@@ -69,7 +70,7 @@ def random_sample(
                      n_samples, 
                      seed, 
                      array_order, 
-                     scaled_shape, 
+                     shape, 
                      name, 
                      weights, 
                      _add_info
@@ -100,7 +101,7 @@ def _sample(
             n_samples, 
             seed, 
             array_order, 
-            scaled_shape, 
+            shape, 
             name, 
             weights, 
             _add_info):
@@ -108,7 +109,7 @@ def _sample(
     select random sample
     """
     for i, col in enumerate(array_order):
-        df = df.loc[(df[col] < scaled_shape[i])].copy()
+        df = df[df[col] < shape[i]].copy()
     if n_samples == 0:
         print(f"Random {name} obtained")
         pairs = list(sample.keys())
@@ -144,7 +145,7 @@ def _sample(
                        n_samples, 
                        seed, 
                        array_order, 
-                       scaled_shape, 
+                       shape, 
                        name, 
                        weights, 
                        _add_info)
@@ -165,8 +166,10 @@ def _add_sample_info(id_col,
         ID = sample_df[id_col].values[i]
         t = sample_df[time_col].values[i]
         pair = (ID, t)
-        lil_df = df.loc[
-            (df[id_col] == ID) & 
+        wt_df = df[df[id_col] == ID].reset_index(drop=True)
+        #print('time: ', t, ', no tracks: ', len(wt_df), ', tmax, tmin: ', 
+         #    wt_df[time_col].values.max(), wt_df[time_col].values.min(), ', expected tracks: ', wt_df['track_length'].values.mean())
+        lil_df = df.loc[(df[id_col] == ID) &
             (df[time_col] >= t - _frames) & 
             (df[time_col] <= t + _frames)
             ]
@@ -483,7 +486,7 @@ def sample_tracks(df: DataFrame,
                   seed: Union[int, None] =None,
                   weights: Union[str, None] =None,
                   max_lost_prop: Union[float, None] =None,
-                  min_track_length: Union[int, None] =50,
+                  min_track_length: Union[int, None] =30,
                   **kwargs):
     # calculate weights if required
     coords_cols = _coords_cols(array_order, non_tzyx_col, time_col)
@@ -494,13 +497,26 @@ def sample_tracks(df: DataFrame,
         if weights not in df.columns.values.tolist():
             if weights == '2-norm':
                 df = _add_disp_weights(df, coords_cols, id_col)
+            elif weights == 'log-frequency':
+                df = _add_logfreq_weights(df, id_col)
             else: 
-                m = 'Please use a column in the data frame or 2-norm to add distances'
-                raise(KeyError(m))
+                cols = df.columns.values
+                if weights not in cols:
+                    m = 'Please use a column in the data frame or 2-norm to add distances'
+                    raise(KeyError(m))
     # filter for min track length
     df = add_track_length(df, id_col, new_col='track_length') 
+    print(min_track_length)
+    print(len(df))
     if min_track_length is not None:
-        df = df.loc[df['track_length'] >= min_track_length, :]
+        from misc import find_splits, no_tracks_correct
+        splits = find_splits(df, time_col=time_col, id_col=id_col)
+        assert len(splits) == 0
+        no_tracks_correct(df, id_col)
+        df = df[df['track_length'] >= min_track_length]
+        df = df.reset_index()
+        print(df['track_length'].values.min())
+        print(len(df))
     # get the sample
     sample = random_sample(
                            df,
@@ -556,6 +572,18 @@ def _add_disp_weights(df, coords_cols, id_col):
         return df
 
 
+# referenced in sample_tracks()
+def _add_logfreq_weights(df, id_col):
+    bin_count = np.bincount(df[id_col].values)
+    id_dict = {i : bin_count[i] for i in range(len(bin_count))}
+    df['frequency'] = df[id_col].apply(id_dict.get)
+    df['log-frequency'] = np.log(df['frequency'].values)
+    max_ = df['log-frequency'].values.max()
+    min_ = df['log-frequency'].values.min()
+    print(min_, max_)
+    return df
+
+
 # referenced in sample_tracks() 
 def _add_track_arrays(sample, id_col, time_col, coords_cols):
     '''
@@ -575,7 +603,6 @@ def _add_track_arrays(sample, id_col, time_col, coords_cols):
     # it is returned, the sample = function(sample, arg0, ...) approach
     # is the clearest way to demonstrate logic & info flow
     return sample 
-
 
 # -------------------------
 # SAMPLE TRACK TERMINATIONS
@@ -837,9 +864,12 @@ def get_objects_without_tracks(
 # -------
 
 def add_track_length(df, id_col, new_col='track_length'):
-    id_array = df[id_col].to_numpy()
-    track_count = np.bincount(id_array)
-    df[new_col] = track_count[id_array]
+    bincounts = np.bincount(df[id_col].values)
+    ids_dict = {ID : num for ID, num in enumerate(bincounts) if num > 0}
+    df[new_col] = [None, ] * len(df)
+    for ID in ids_dict.keys():
+        idxs = df[df[id_col] == ID].index.values
+        df.at[idxs, new_col] = ids_dict[ID]
     return df
 
 
@@ -920,9 +950,9 @@ def read_from_h5(h5_path, channel='channel2'):
         {'t<index>' : {'channel<index>' : <3d array>, ...}, ...} 
     '''
     import h5py
-    print('imported h5py')
+    #print('imported h5py')
     with h5py.File(h5_path) as f:
-        print('read h5 file')
+        #print('read h5 file')
         t_keys = [int(key[1:]) for key in f.keys() if 't' in key]
         t_keys = ['t' + str(key) for key in sorted(t_keys)]
         #print(t_keys)
@@ -930,16 +960,16 @@ def read_from_h5(h5_path, channel='channel2'):
         #print(c_keys)
         #images = []
         frame = f[t_keys[0]][c_keys[0]]
-        print('Getting channel with key: ', channel)
+        #print('Getting channel with key: ', channel)
         for i, c in enumerate(c_keys):
             if c == channel:
                 chan_image = np.zeros((len(t_keys), ) + frame.shape, dtype=frame.dtype)
-                print('Generated empty numpy for channel with shape: ', chan_image.shape)
+                #print('Generated empty numpy for channel with shape: ', chan_image.shape)
                 for j, t in enumerate(t_keys):
                     chan_image[j, :, :, :] = f[t][c]
-                print('Added h5 data to np array')
+                #print('Added h5 data to np array')
                 image = da.from_array(chan_image)
-                print('converted to dask')
+                #print('converted to dask')
                 #images.append(chan_da)
                 #image = chan_da
     return image
@@ -951,7 +981,7 @@ def read_from_h5(h5_path, channel='channel2'):
 
 def get_sample_hypervolumes(sample, img_channel=None):
     image_path = sample['image_path']
-    print(image_path)
+    #print(image_path)
     labels_path = sample['labels_path']
     image = open_with_correct_modality(image_path, img_channel)
     if labels_path is not None:
@@ -1016,7 +1046,7 @@ def save_sample(save_dir, sample):
         'sample_type' : sample['sample_type'], 
         'coord_info' : sample['coord_info']
     }
-    print(sample_json)
+    #print(sample_json)
     json_name = file_name + '_read-info.json'
     with open(os.path.join(sample_dir, json_name), 'w') as f:
         json.dump(sample_json, f, indent=4)
@@ -1025,16 +1055,19 @@ def save_sample(save_dir, sample):
     sample['info'].to_csv(os.path.join(sample_dir, info_name))
     # save the individual samples
     for pair in pairs:
-        pair_dir = os.path.join(sample_dir, str(pair))
+        pair_name = f'id-{pair[0]}_t-{pair[1]}'
+        pair_dir = os.path.join(sample_dir, pair_name)
         os.makedirs(pair_dir)
         # save the df
-        df_name = str(pair) + '_df.csv'
+        df_name = pair_name + '_df.csv'
         sample[pair]['df'].to_csv(os.path.join(pair_dir, df_name))
         # save the tracks
-        tracks_name = str(pair) + '_tracks.zarr'
-        zarr.save(os.path.join(pair_dir, tracks_name), sample[pair]['tracks'])
+        tracks_name = pair_name + '_tracks.zarr'
+        t_data = sample[pair]['tracks']
+        tracks = zarr.open(os.path.join(pair_dir, tracks_name), mode='w', shape=t_data.shape, chunks=t_data.shape)
+        tracks[:, :] = t_data
         # save the bounding box
-        bbox_name = str(pair) + '_bbox.json'
+        bbox_name = pair_name + '_bbox.json'
         new_bbox = sample[pair]['b_box'].copy()
         for key in new_bbox.keys():
             s_ = new_bbox[key]
@@ -1044,7 +1077,7 @@ def save_sample(save_dir, sample):
         # if there are any corrections, save
         try:
             if len(sample[pair]['corr']) > 0:
-                corr_name = str(pair) + '_corr.json'
+                corr_name = pair_name + '_corr.json'
                 with open(os.path.join(pair_dir, corr_name), 'w') as f:
                     json.dump(sample[pair]['corr'], f)
         except:
@@ -1052,15 +1085,17 @@ def save_sample(save_dir, sample):
         # if the image is in the sample, save this
         try:
             img = sample[pair]['image']
-            image_path = os.path.join(pair_dir, str(pair) + '_image.zarr')
-            zarr.save(image_path, img)
+            image_path = os.path.join(pair_dir, pair_name + '_image.zarr')
+            img_zarr = zarr.open(image_path, mode='w', shape=img.shape, chunks=img.shape, dtype=img.dtype)
+            img_zarr[:, :, :, :] = img
         except KeyError:
             pass
         # if the label is in the sample, save this
         try:
             lab = sample[pair]['labels']
-            labels_path = os.path.join(pair_dir, str(pair) + '_labels.zarr')
-            zarr.save(labels_path, lab)
+            labels_path = os.path.join(pair_dir, pair_name + '_labels.zarr')
+            lab_zarr = zarr.open(labels_path, mode='w', shape=lab.shape, chunks=lab.shape, dtype=lab.dtype)
+            lab_zarr[:, :, :, :] = lab
         except KeyError:
             pass
 
@@ -1082,7 +1117,8 @@ def read_sample(sample_path):
     sample['info'] = pd.read_csv(os.path.join(sample_path, info_path[0]))
     info_path = os.path.join(sample_path, info_path[0])
     # get individual sample
-    pairs = [f for f in files if f.endswith(')') and f.startswith('(')]
+    regex = re.compile(r'id-\d*_t-\d*')
+    pairs = [f for f in files if len(regex.findall(f)) > 0]
     for str_pair in pairs:
         pair_dir = os.path.join(sample_path, str_pair)
         pair_dict = {}
@@ -1113,17 +1149,24 @@ def read_sample(sample_path):
         img_path = os.path.join(pair_dir, str_pair + '_image.zarr')
         if os.path.exists(img_path):
             img = zarr.open(img_path)
+            #print(img, img_path)
             pair_dict['image'] = img
         # if labels exist, read
         lab_path = os.path.join(pair_dir, str_pair + '_labels.zarr')
         if os.path.exists(lab_path):
             lab = zarr.open(lab_path)
+            #print(lab.shape)
             pair_dict['labels'] = lab
         # add pair to sample
-        pair = eval(str_pair)
+        id_re = re.compile(r'id-\d*')
+        ID = id_re.findall(str_pair)[0][3:]
+        t_re = re.compile(r't-\d*')
+        t = t_re.findall(str_pair)[0][2:]
+        pair = (int(ID), int(t))
         sample[pair] = pair_dict
+        #print(str_pair, pair)
     #print(list(sample.keys()))
-    print(list(sample[eval(pairs[0])].keys()))
+    #print(list(sample[eval(pairs[0])].keys()))
     return sample
 
 
