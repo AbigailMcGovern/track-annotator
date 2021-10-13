@@ -3,7 +3,7 @@ Napari-based tool for the annotation and quantification of errors in multi-objec
 
 ## Sampling
 
-To randomly sample track segments from a single tracks file corresponding to an image. To be honest, I don't use this directly but in `sample_from_meta.py` which obtains samples based on the metadata saved with the platelets data (super specific use case). At the moment, the filtering by track length seems to be broken =(
+To randomly sample track segments from a single tracks file corresponding to an image. To be honest, I don't use this directly but in `sample_from_meta.py` which obtains samples based on the metadata saved with the platelets data (super specific use case). 
 
 ```Python
 from sampling import sample_tracks, get_sample_hypervolumes, save_sample
@@ -76,12 +76,13 @@ sample_viewer.annotate()
 P.S., this hasn't been extensively tested... the main parts work in the conditions they've been tested in, but this probably only means I haven't yet seen where it breaks. 
 
 Keys to navagate and annotate samples
-- 'd' - move to next sample
-- 'a' - move to previous sample
+- '2' - move to next sample
+- '1' - move to previous sample
 - 'y' - annotate as correct
 - 'n' - annotate as containing an error
-- 'i' - annotate the frame as following a false positive (ID swap) error
-- 'Shift-i' - annotate the fame as containing a false negative error (incorrect termination)
-- 's' - annotate an error as being associated with a segmentation error (merge or split of objects)
+- 'i' - annotate the frame following a ID swap error
+- 't' - annotate the fame following an incorrect termination
+- 'Shift-t' - annotate the frame containing a false start error
+- 's' - annotate an error ('i', 't', or 'Shift-t') as being associated with a segmentation error (merge or split of objects)
 
-In any case where the error is associated the specific frame, the frame number (within the original image) will be added to a list of those kinds of errors for the sample within the sample's info data frame. E.g., you may have a list of false positives (ID swaps) for your sampled track segment (`[108, 111, 112]`) a corresponding list of segmentation error associations (`[108, 112]`). 
+In any case, where the error is associated the specific frame, the frame number (within the original image) will be added to a list of those kinds of errors for the sample within the sample's info data frame. E.g., you may have a list of false positives (ID swaps) for your sampled track segment (`[108, 111, 112]`) a corresponding list of segmentation error associations (`[108, 112]`). 
