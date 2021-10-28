@@ -470,7 +470,7 @@ def _add_bbox_info(pair, row, sample, array_order, time_col):
 # SAMPLE TRACKS
 # -------------
 
-def sample_tracks(df: DataFrame,
+def sample_tracks(tracks_path: str,
                   image_path: str, 
                   shape : tuple,
                   name: str,
@@ -488,6 +488,10 @@ def sample_tracks(df: DataFrame,
                   max_lost_prop: Union[float, None] =None,
                   min_track_length: Union[int, None] =30,
                   **kwargs):
+    df = pd.read_csv(tracks_path)
+    print(tracks_path)
+    print(image_path)
+    print(labels_path)
     # calculate weights if required
     coords_cols = _coords_cols(array_order, non_tzyx_col, time_col)
     # well this was lazy (see below)
@@ -509,10 +513,10 @@ def sample_tracks(df: DataFrame,
     print(min_track_length)
     print(len(df))
     if min_track_length is not None:
-        from misc import find_splits, no_tracks_correct
-        splits = find_splits(df, time_col=time_col, id_col=id_col)
-        assert len(splits) == 0
-        no_tracks_correct(df, id_col)
+        #from misc import find_splits, no_tracks_correct
+        #splits = find_splits(df, time_col=time_col, id_col=id_col)
+        #assert len(splits) == 0
+        #no_tracks_correct(df, id_col)
         df = df[df['track_length'] >= min_track_length]
         df = df.reset_index()
         print(df['track_length'].values.min())
@@ -539,6 +543,7 @@ def sample_tracks(df: DataFrame,
     sample['image_path'] = image_path
     sample['labels_path'] = labels_path
     sample['sample_type'] = 'random tracks'
+    sample['tracks_path'] = tracks_path
     sample = _add_construction_info(sample, id_col, time_col, 
                                     array_order, non_tzyx_col)
     return sample
@@ -608,7 +613,7 @@ def _add_track_arrays(sample, id_col, time_col, coords_cols):
 # SAMPLE TRACK TERMINATIONS
 # -------------------------
 
-def sample_track_terminations(df: DataFrame,
+def sample_track_terminations(tracks_path: str,
                               image_path: str,
                               shape: tuple, 
                               name: str,
@@ -631,7 +636,7 @@ def sample_track_terminations(df: DataFrame,
     #
     # get sample
     sample = sample_tracks(
-                           df,
+                           tracks_path,
                            image_path,
                            shape, 
                            name,
@@ -924,12 +929,18 @@ def open_with_correct_modality(image_path, channel=None, chan_axis=0):
         else:
             image = layerlist[channel][0]
     elif suffix == '.zarr':
-        image = zarr.open(image_path)
+        image = zarr.open(image_path, 'r')
+        if isinstance(image, zarr.hierarchy.Group):
+            print('group')
+            print(list(image.keys()))
+            print(image_path)
+            raise ValueError('Read in as zarr group... need array like?!')
         if channel is not None:
             s_ = [slice(None, None), ] * len(image.ndim)
             s_[chan_axis] = slice(channel, channel + 1)
             image = image[s_]
             image = da.array(image)
+        print(image)
     elif suffix == '.h5' or suffix == '.hdf5':
         if channel is not None:
             print('channel == None')
@@ -990,6 +1001,9 @@ def get_sample_hypervolumes(sample, img_channel=None):
         labels = None
     array_order = sample['coord_info']['array_order']
     pairs = [key for key in sample.keys() if isinstance(key, tuple)]
+    #if labels is not None:
+        #print(labels.shape)
+        #labels = np.array(labels)
     for pair in pairs:
         l = len(array_order)
         m = f'Image must be of same dimensions ({l}) as in the sample array_order: {array_order}'
@@ -1025,7 +1039,7 @@ def save_sample(save_dir, sample):
     """
     pairs = [key for key in sample.keys() if isinstance(key, tuple)]
     n_samples = len(pairs)
-    file_name = Path(sample['image_path']).stem
+    file_name = Path(sample['tracks_path']).stem
     if sample['sample_type'] == 'random tracks':
         tp = 'rtracks'
     elif sample['sample_type'] == 'track terminations':
@@ -1044,7 +1058,8 @@ def save_sample(save_dir, sample):
         'image_path' : sample['image_path'],
         'labels_path' : sample['labels_path'],
         'sample_type' : sample['sample_type'], 
-        'coord_info' : sample['coord_info']
+        'coord_info' : sample['coord_info'], 
+        'tracks_path' : sample['tracks_path']
     }
     #print(sample_json)
     json_name = file_name + '_read-info.json'
