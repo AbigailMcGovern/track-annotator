@@ -1,3 +1,4 @@
+from genericpath import exists
 import os
 from numpy.random import sample
 import pandas as pd 
@@ -7,6 +8,7 @@ from sampling import sample_tracks, sample_track_terminations, sample_objects, g
 from pathlib import Path
 from nd2_dask.nd2_reader import nd2_reader
 import zarr
+import re
 
 
 md_cols = ['file', 'px_microns', 'axes', 'cohort', 'treatment', 'scale', 
@@ -23,6 +25,8 @@ def get_sample_from_metadata(
     metadata,
     tracks_dir, 
     image_dir,
+    save_dir=None,
+    name='',
     sample_type='tracks', 
     n_each=100, 
     stratify_by=['cohort', 'treatment'], 
@@ -41,7 +45,10 @@ def get_sample_from_metadata(
     min_track_length=30,
     labels_dir=None, 
     batch_name=None,
-    use_h5=False
+    use_h5=False, 
+    image_channel=2,
+    repeat_file=False, 
+    weights='log-frequency',
     #
     ):
     '''
@@ -52,20 +59,32 @@ def get_sample_from_metadata(
     stratify_by = metadata['stratify_by'].unique()
     samples_dict = {}
     for cond in stratify_by:
+        if save_dir is not None:
+            cond_bf = make_bash_friendly(cond)
+            cond_dir = os.path.join(save_dir, name + '_' + cond_bf)
+            os.makedirs(cond_dir, exist_ok=True)
+            existing_samples = [smpl for smpl in os.listdir(cond_dir) if smpl.endswith('.smpl')]
+            print(existing_samples)
         df = metadata[metadata['stratify_by'] == cond]
+        df = df.reset_index()
+        print(len(df))
+        print(df.index.values)
+        print(df.head())
         no_exp = len(df)
         no_each = np.floor_divide(n_each, no_exp)
         remainder = n_each % no_exp
         n_per_exp = [no_each, ] * no_exp
         n_per_exp[0] += remainder
         samples_list = []
+        print(n_per_exp)
         for i, n in enumerate(n_per_exp):
             path = os.path.join(tracks_dir, df.loc[i, tracks_file])
+            print(path)
             tracks = pd.read_csv(path)
             if sub_dirs is not None:
-                stem_dir = Path(image_path).stem
-                to_join = [image_path, ] + [df[sd][0] for sd in sub_dirs if df[sd][0] != stem_dir]
+                to_join = [image_dir, ] + [df[sd][0] for sd in sub_dirs]
                 image_nested_dir = os.path.join(*to_join)
+                print(image_nested_dir)
             else:
                 image_nested_dir = image_dir
             if use_h5:
@@ -73,6 +92,7 @@ def get_sample_from_metadata(
             else:
                 image_name = df.loc[i, image_file] + '.nd2'
             image_path = os.path.join(image_nested_dir, image_name)
+            print(image_path)
             if not debug_without_tracks:
                 if shape is None and not use_h5:
                     layer_list = nd2_reader(image_path)
@@ -99,17 +119,50 @@ def get_sample_from_metadata(
                     'array_order' : array_order, 
                     'non_tzyx_col' : None, 
                     'seed' : None, 
-                    'weights' : 'log-frequency', 
+                    'weights' : weights, 
                     'max_lost_prop' : None, 
                     'min_track_length' : min_track_length, 
                     'labels_path' : labels_path
                 }
                 #print(kwargs)
                 if sample_type == 'tracks':
-                    sample = sample_tracks(tracks, image_path, shape, tracks_name, n, **kwargs)
+                    if repeat_file:
+                        sample = sample_tracks(path, image_path, shape, tracks_name, n, **kwargs)
+                        sample = get_sample_hypervolumes(sample, img_channel=image_channel)
+                        samples_list.append(sample)
+                        if save_dir is not None:
+                            save_sample(cond_dir, sample)
+                    else:
+                        print(tracks_name)
+                        file_matches = [f for f in existing_samples if f.find(tracks_name) != -1]
+                        print(file_matches)
+                        if len(file_matches) > 0:
+                            # we only want to get samples not yet done
+                            p = re.compile(r'id-\d*_t-\d*')
+                            for f in file_matches:
+                                smpl_dir = os.path.join(cond_dir, f)
+                                smpls = [f for f in os.listdir(smpl_dir) if len(p.findall(f)) > 0]
+                                new_n = n - len(smpls) # how many to get
+                                if new_n <= 0:
+                                    sample = None
+                                else:
+                                    sample = sample_tracks(path, image_path, shape, tracks_name, new_n, **kwargs)
+                                    sample = get_sample_hypervolumes(sample, img_channel=image_channel)
+                                    if save_dir is not None:
+                                            save_sample(cond_dir, sample)
+                            samples_list.append(None)
+                        else:
+                            sample = sample_tracks(path, image_path, shape, tracks_name, n, **kwargs)
+                            sample = get_sample_hypervolumes(sample, img_channel=image_channel)
+                            if save_dir is not None:
+                                save_sample(cond_dir, sample)
+                    samples_list.append(sample)
                 elif sample_type == 'terminations':
-                    sample = sample_track_terminations(tracks, image_path, shape, tracks_name, n, **kwargs)
+                    sample = sample_track_terminations(path, image_path, shape, tracks_name, n, **kwargs)
+                    samples_list.append(sample)
                 elif sample_type == 'objects':
+                    # this block is very much at draft stage so may or may not work... 
+                        # ... a very good guess is no
                     m = 'Please provide dir with labels data to argument: labels_dir'
                     assert labels_dir is not None, m
                     m = 'Please provide correct batch name to arument: batch_name'
@@ -117,7 +170,7 @@ def get_sample_from_metadata(
                     labels_path = get_labels_path(tracks, i, sub_dirs, labels_dir, batch_name)
                     labels = zarr.open(labels)
                     sample = sample_objects(tracks, labels, image_path, tracks_name, n, **kwargs)
-                samples_list.append(sample)
+                    samples_list.append(sample)
             else:
                 samples_list.append(None)
         samples_dict[cond] = samples_list
@@ -142,6 +195,11 @@ def get_labels_path(df, i, sub_dirs, labels_dir, batch_name):
     return labels_path
 
 
+def make_bash_friendly(s):
+    s = s.replace(' ', '_')
+    s = s.replace('(', '_')
+    s = s.replace(')', '_')
+    return s
 
 # ---------------------------------------
 # Obtain image and labels data for sample
@@ -165,7 +223,8 @@ if __name__ == '__main__':
     tracks_dir = '/home/abigail/data/plateseg-training/timeseries_seg/problem-children/210922_185235_problem-children_platelet-tracks'
     image_dir = '/home/abigail/data/plateseg-training/timeseries_seg/problem-children'
     labels_dir = '/home/abigail/data/plateseg-training/timeseries_seg/problem-children/210922_185235_problem-children_segmentations/timeseries_seg/problem-children'
-    sample_dict = get_sample_from_metadata(meta, tracks_dir, image_dir, sub_dirs=None, 
-                                           use_h5=True, batch_name='210922_185235_problem-children', labels_dir=labels_dir)
     save_dir = '/home/abigail/data/plateseg-training/timeseries_seg/problem-children'
-    save_sample_data(sample_dict, save_dir)
+    #sample_dict = get_sample_from_metadata(meta, tracks_dir, image_dir, save_dir=save_dir, name='PCs-2', sub_dirs=None, image_channel=None,
+                       #                    use_h5=True, batch_name='210922_185235_problem-children', labels_dir=labels_dir)
+    sample_dict = get_sample_from_metadata(meta, tracks_dir, image_dir, save_dir=save_dir, name='PC-terms-0', sub_dirs=None, image_channel=None,
+                                           use_h5=True, batch_name='210922_185235_problem-children', labels_dir=labels_dir, sample_type='terminations')
